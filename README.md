@@ -62,5 +62,5 @@ STATUS = STATUS_BOMB | STATUS_LEFT | STATUS_RIGHT
 用戶端 SHOULD 只在收到 STATUS_BOMB 之後才讓使用者點下按鈕或送出封包，
 但伺服端 MUST 判斷用戶端的封包是否在適當的時間送出。
 
-MOVE = "3L" | "1L" | "1R" | "2R"
+MOVE = "L3" | "L1" | "R1" | "R2"
 代表把炸彈向左或右傳幾個使用者。
