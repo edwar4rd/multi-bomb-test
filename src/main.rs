@@ -308,6 +308,7 @@ async fn game_server(
     println!("Server Started");
     loop {
         // Wait for a first player to start the game
+        println!("Waiting for first player to join...");
         let (new_player_id, request_response_tx) = match game_request_rx.recv().await {
             Some((new_player_id, request_response_tx)) => (new_player_id, request_response_tx),
             None => {
@@ -315,6 +316,7 @@ async fn game_server(
                 break;
             }
         };
+        println!("A player joined...");
 
         // only insert/delete when players join or leave
         // a set of all players (for calculating new bomb position)
@@ -363,6 +365,11 @@ async fn game_server(
                 leaved_player = player_leave_notify_rx.recv() => {
                     let leaved_player = leaved_player.unwrap();
                     players.remove(&leaved_player);
+                    if players.len() == 0 {
+                        println!("All player leaved...");
+                        break;
+                    }
+
                     players_channel.remove(&leaved_player);
                     players_data.remove(&leaved_player);
                     players_score.remove(&leaved_player);
