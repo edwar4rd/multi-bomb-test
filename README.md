@@ -68,6 +68,40 @@ MOVE = "move\n" + index + " " + ("L3" | "L1" | "R1" | "R2")
 代表把炸彈向左或右傳幾個使用者，
 其中 index 代表要移動哪個炸彈。
 
+ABNF ( RFC 5234 )
+
+```
+ALPHA        =  %x41-5A / %x61-7A
+DIGIT        =  %x30-39
+HEXDIG       =  DIGIT / "A" / "B" / "C" / "D" / "E" / "F"
+u32          =  1*9DIGIT
+u32          =/ "4" ("0"/"1") 8DIGIT
+u32          =/ "42" ("0"/"1"/"2"/"3"/"4"/"5"/"6"/"7"/"8") 7DIGIT
+u32          =/ "429" ("0"/"1"/"2"/"3") 6DIGIT
+u32          =/ "4294" ("0"/"1"/"2"/"3"/"4"/"5"/"6"/"7"/"8") 5DIGIT
+u32          =/ "42949" ("0"/"1"/"2"/"3"/"4"/"5") 4DIGIT
+u32          =/ "429496" ("0"/"1"/"2"/"3"/"4"/"5"/"6") 3DIGIT
+u32          =/ "4294967" ("0"/"1") 2DIGIT
+u32          =/ "42949672" ("0"/"1"/"2"/"3"/"4"/"5"/"6"/"7"/"8") 1DIGIT
+u32          =/ "429496729" ("0"/"1"/"2"/"3"/"4"/"5")
+COUNT        =  u32
+PREID        =  u32
+INDEX        =  u32
+SCORE        =  u32
+BOMBPOS      =  "L"/"X"/"R"
+BOMBACTION   =  "L3"/"L1"/"R1"/"R2"
+PLRNAME      =  1*32(ALPHA/DIGIT)
+PLRCLR       =  "#" 6HEXDIG
+HELLO        =  "hello\n" COUNT
+OLLEH        =  "olleh\n" PREID
+STATUS       =  "status\n" INDEX " " BOMBPOS
+MOVE         =  "move\n" INDEX " " BOMBACTION
+NAME         =  "name\n" PLRNAME "\n" PLRCLR
+BOARD        =  "board\n" 1*(PLRNAME "\n" PLRCLR "\n" SCORE "\n")
+CLIENTPACKET =  OLLEH / MOVE
+SERVERPACKET =  HELLO / NAME / STATUS / BOARD
+```
+
 ## 伺服器程式架構設計
 
 (簡單版本：暫時只支援單一個遊戲中一個炸彈，也不處理只有一個玩家的狀況)
@@ -89,3 +123,4 @@ MOVE = "move\n" + index + " " + ("L3" | "L1" | "R1" | "R2")
 - 玩家太久沒傳炸彈可以被視為 AFK
 - 多於一個炸彈
   - 似乎比我想的麻煩很多
+
