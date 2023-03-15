@@ -206,13 +206,22 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
         tokio::select! {
             biased;
 
-            _ = socket.recv() => {
-                println!("Received unexpected packet from client...");
+            packet = socket.recv() => {
                 player_leave_notify.send(player_id).await.unwrap();
-                socket
-                    .send(axum::extract::ws::Message::Close(Option::None))
-                    .await
-                    .unwrap();
+
+                let packet = packet.unwrap().unwrap();
+                match packet {
+                    axum::extract::ws::Message::Close(_) => {
+                        println!("Client leaved...");
+                    }
+                    _ => {
+                        socket
+                            .send(axum::extract::ws::Message::Close(Option::None))
+                            .await
+                            .unwrap();
+                        println!("Received unexpected packet from client...");
+                    }
+                }
                 return;
             }
             update = update_receiver.recv() => {
@@ -250,10 +259,6 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                             axum::extract::ws::Message::Close(_) => {
                                 println!("A websocket connection closed before sending a MOVE response...");
                                 player_leave_notify.send(player_id).await.unwrap();
-                                socket
-                                    .send(axum::extract::ws::Message::Close(Option::None))
-                                    .await
-                                    .unwrap();
                                return;
                             }
                             axum::extract::ws::Message::Text(text) => text,
