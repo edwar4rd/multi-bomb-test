@@ -1,6 +1,7 @@
 let id = prompt("Please enter your preferred ID number", Math.floor(Math.random() * 200));
 
 let socket = new WebSocket("ws://127.0.0.1:3000/ws");
+let bomb_text = {"X": ">!!!<", "L": "<< BOMB", "R": "BOMB >>"};
 
 let clickable = [false];
 
@@ -68,7 +69,7 @@ socket.onopen = (event) => {
             case "status":
                 var bomb_div = document.getElementById("game-bomb-div");
                 console.log("status: " + msg_split[1]);
-                bomb_div.children[msg_split[1].split(" ")[0]].children[2].innerText = msg_split[1].split(" ")[1];
+                bomb_div.children[msg_split[1].split(" ")[0]].children[2].innerText = bomb_text[msg_split[1].split(" ")[1]];
                 if (msg_split[1].split(" ")[1] == "X") {
                     bomb_div.children[msg_split[1].split(" ")[0]].children[2].classList.remove("game-bomb-display-l");
                     bomb_div.children[msg_split[1].split(" ")[0]].children[2].classList.remove("game-bomb-display-r");
