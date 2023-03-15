@@ -269,11 +269,12 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                             Ok(axum::extract::ws::Message::Close(_)) => {
                                 println!("A websocket connection closed before sending a MOVE response...");
                                 player_leave_notify.send(player_id).await.unwrap();
-                               return;
+                                return;
                             }
                             Ok(axum::extract::ws::Message::Text(text)) => text,
                             _ => {
                                 println!("A websocket connection sended a MOVE response that's not a text message...");
+                                player_leave_notify.send(player_id).await.unwrap();
                                 socket
                                     .send(axum::extract::ws::Message::Close(Option::None))
                                     .await
@@ -283,6 +284,7 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                         };
                         if !response.starts_with("move\n0 ") || response.len() != 9 {
                             println!("A websocket connection sended a MOVE response that's not formatted properly...");
+                            player_leave_notify.send(player_id).await.unwrap();
                             socket
                                 .send(axum::extract::ws::Message::Close(Option::None))
                                 .await
@@ -293,6 +295,7 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                             Ok(player_move) => player_move,
                             Err(_) => {
                                 println!("A websocket connection sended a MOVE response that's not formatted properly...");
+                                player_leave_notify.send(player_id).await.unwrap();
                                 socket
                                     .send(axum::extract::ws::Message::Close(Option::None))
                                     .await
