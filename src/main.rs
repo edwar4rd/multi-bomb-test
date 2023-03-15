@@ -209,9 +209,14 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
             packet = socket.recv() => {
                 player_leave_notify.send(player_id).await.unwrap();
 
-                let packet = packet.unwrap().unwrap();
+                let packet = packet.unwrap();
                 match packet {
-                    axum::extract::ws::Message::Close(_) => {
+                    Err(_) => {
+                        println!("A websocket connection produced a error (probably abruptly closed)...");
+                        player_leave_notify.send(player_id).await.unwrap();
+                        return;
+                    }
+                    Ok(axum::extract::ws::Message::Close(_)) => {
                         println!("Client leaved...");
                     }
                     _ => {
@@ -255,13 +260,18 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                             )))
                             .await
                             .unwrap();
-                        let response = match socket.recv().await.unwrap().unwrap() {
-                            axum::extract::ws::Message::Close(_) => {
+                        let response = match socket.recv().await.unwrap() {
+                            Err(_) => {
+                                println!("A websocket connection produced a error (probably abruptly closed) before sending a MOVE response...");
+                                player_leave_notify.send(player_id).await.unwrap();
+                                return;
+                            }
+                            Ok(axum::extract::ws::Message::Close(_)) => {
                                 println!("A websocket connection closed before sending a MOVE response...");
                                 player_leave_notify.send(player_id).await.unwrap();
                                return;
                             }
-                            axum::extract::ws::Message::Text(text) => text,
+                            Ok(axum::extract::ws::Message::Text(text)) => text,
                             _ => {
                                 println!("A websocket connection sended a MOVE response that's not a text message...");
                                 socket
