@@ -1,0 +1,32 @@
+ALPHA        =  %x41-5A / %x61-7A
+DIGIT        =  %x30-39
+HEXDIG       =  DIGIT / "A" / "B" / "C" / "D" / "E" / "F"
+u32          =  1*9DIGIT
+u32          =/ "4" ("0"/"1") 8DIGIT
+u32          =/ "42" ("0"/"1"/"2"/"3"/"4"/"5"/"6"/"7"/"8") 7DIGIT
+u32          =/ "429" ("0"/"1"/"2"/"3") 6DIGIT
+u32          =/ "4294" ("0"/"1"/"2"/"3"/"4"/"5"/"6"/"7"/"8") 5DIGIT
+u32          =/ "42949" ("0"/"1"/"2"/"3"/"4"/"5") 4DIGIT
+u32          =/ "429496" ("0"/"1"/"2"/"3"/"4"/"5"/"6") 3DIGIT
+u32          =/ "4294967" ("0"/"1") 2DIGIT
+u32          =/ "42949672" ("0"/"1"/"2"/"3"/"4"/"5"/"6"/"7"/"8") 1DIGIT
+u32          =/ "429496729" ("0"/"1"/"2"/"3"/"4"/"5")
+
+COUNT        =  u32
+PREID        =  u32
+INDEX        =  u32
+SCORE        =  u32
+BOMBPOS      =  "L"/"X"/"R"
+BOMBACTION   =  "L3"/"L1"/"R1"/"R2"
+PLRNAME      =  1*32(ALPHA/DIGIT)
+PLRCLR       =  "#" 6HEXDIG
+
+HELLO        =  "hello\n" COUNT
+STATUS       =  "status\n" INDEX " " BOMBPOS
+NAME         =  "name\n" PLRNAME "\n" PLRCLR
+BOARD        =  "board\n" 1*(PLRNAME "\n" PLRCLR "\n" SCORE "\n")
+SERVERPACKET =  HELLO / NAME / STATUS / BOARD
+
+OLLEH        =  "olleh\n" PREID
+MOVE         =  "move\n" INDEX " " BOMBACTION
+CLIENTPACKET =  OLLEH / MOVE
