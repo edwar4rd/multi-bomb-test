@@ -3,71 +3,50 @@ use axum::extract::State;
 
 use axum::{routing::get, Router};
 
-#[derive(Debug)]
-enum BombMoveAction {
-    L3,
-    L1,
-    R1,
-    R2,
-}
-
-impl std::str::FromStr for BombMoveAction {
-    type Err = ();
-
-    fn from_str(input: &str) -> Result<BombMoveAction, Self::Err> {
-        match input {
-            "L3" => Ok(BombMoveAction::L3),
-            "L1" => Ok(BombMoveAction::L1),
-            "R1" => Ok(BombMoveAction::R1),
-            "R2" => Ok(BombMoveAction::R2),
-            _ => Err(()),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum BombPosition {
-    L,
-    R,
-}
+use multi_bomb_test::packet::*;
 
 #[derive(Debug)]
 enum GameUpdate {
     BombMoved(BombPosition),
+    // the player is expected to send back a BombMoveAction as response
     BombReceived(tokio::sync::oneshot::Sender<BombMoveAction>),
 }
 
 #[derive(Clone)]
 struct AppState {
     // Channel for a newly created websocket handler to ask for a game to join
-    game_request_tx: tokio::sync::mpsc::Sender<(
-        // Newly connected client can suggest a position for the player
-        u32,
-        // Stuff that handler for the client expect to receive
+    game_request_tx: tokio::sync::mpsc::Sender<
         tokio::sync::oneshot::Sender<(
-            // internal id for the player/handler (currently only used for signaling that the player has leaved)
-            u32,
-            String,
-            tokio::sync::mpsc::Receiver<GameUpdate>,
-            tokio::sync::watch::Receiver<String>,
-            tokio::sync::mpsc::Sender<u32>,
+            // bomb count is sent before hello packet
+            BombCount,
+            tokio::sync::oneshot::Sender<(
+                // Newly connected client can suggest a position/ID for the player
+                PreferredID,
+                // Player data are only created after olleh packet
+                tokio::sync::oneshot::Sender<(
+                    PlayerID,
+                    (PlayerName, PlayerColor),
+                    tokio::sync::mpsc::Receiver<(BombIndex, GameUpdate)>,
+                    tokio::sync::watch::Receiver<GameScoareboard>,
+                    tokio::sync::mpsc::Sender<PlayerID>,
+                )>,
+            )>,
         )>,
-    )>,
+    >,
 }
 
-fn random_player_data() -> String {
-    format!(
-        "{:04X}\n{}",
-        rand::random::<u16>(),
-        random_color::RandomColor::new().to_hex()
+fn random_player_data() -> (PlayerName, PlayerColor) {
+    (
+        format!("Player{:04X}", rand::random::<u16>(),),
+        format!("#{:06X}", rand::random::<u32>() >> 8,),
     )
 }
 
 fn move_bomb<'a>(
-    bomb_pos: u32,
-    players: &'a std::collections::BTreeSet<u32>,
+    bomb_pos: BombIndex,
+    players: &'a std::collections::BTreeSet<BombIndex>,
     player_move: BombMoveAction,
-) -> u32 {
+) -> BombIndex {
     // assert!(players.contains(&bomb_pos));
     match player_move {
         BombMoveAction::R1 => {
@@ -116,10 +95,18 @@ async fn ws_get_handler(
 
 async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
     println!("New websocket connection has established...");
+
+    println!("Requesting server connection for a new player to join...");
+    let (first_result_tx, first_result_rx) = tokio::sync::oneshot::channel();
+    state.game_request_tx.send(first_result_tx).await.unwrap();
+
+    let (bomb_count, olleh_tx) = first_result_rx.await.unwrap();
+
     socket
-        .send(axum::extract::ws::Message::Text("hello\n1".into()))
+        .send(ServerPacket::PacketHELLO(bomb_count).into())
         .await
         .unwrap();
+
     let response = match tokio::time::timeout(tokio::time::Duration::from_secs(10), socket.recv())
         .await
     {
@@ -153,7 +140,7 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
     let text_response = match response {
         ws::Message::Text(text_response) => text_response,
         _ => {
-            println!("A websocket connection sended a OLLEH response that's not a text message...");
+            println!("A websocket connection sent a OLLEH response that's not a text message...");
             socket
                 .send(axum::extract::ws::Message::Close(Option::None))
                 .await
@@ -162,45 +149,46 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
         }
     };
 
-    if text_response.len() <= 6 || &text_response[0..6] != "olleh\n" {
-        println!("A websocket connection sended a OLLEH response that's not formatted properly...");
-        socket
-            .send(axum::extract::ws::Message::Close(Option::None))
-            .await
-            .unwrap();
-        return;
-    }
-
-    let suggested_pos: u32 = match text_response[6..].parse() {
-        Ok(num) => num,
-        Err(_) => {
-            println!("A websocket connection sended a OLLEH response containing a bad number...");
+    let suggested_pos = match text_response.parse::<ClientPacket>() {
+        Err(err) => {
+            println!("A websocket connection sent a packet expected to be a OLLEH but failed parsing:\n\t{}", err);
             socket
                 .send(axum::extract::ws::Message::Close(Option::None))
                 .await
                 .unwrap();
             return;
         }
+        Ok(ClientPacket::PacketMOVE(_, _)) => {
+            println!("A websocket connection sent a packet expected to be a OLLEH but is a MOVE");
+            socket
+                .send(axum::extract::ws::Message::Close(Option::None))
+                .await
+                .unwrap();
+            return;
+        }
+        Ok(ClientPacket::PacketOLLEH(suggested_pos)) => suggested_pos,
     };
 
     println!("Requesting server connection for a new player to join...");
     let (request_result_tx, request_result_rx) = tokio::sync::oneshot::channel();
-    state
-        .game_request_tx
-        .send((suggested_pos, request_result_tx))
-        .await
-        .unwrap();
-    let (player_id, player_data, mut update_receiver, scoreboard_receiver, player_leave_notify) =
-        request_result_rx.await.unwrap();
+    olleh_tx.send((suggested_pos, request_result_tx)).unwrap();
+
+    let (
+        player_id,
+        (player_name, player_color),
+        mut update_receiver,
+        scoreboard_receiver,
+        player_leave_notify,
+    ) = request_result_rx.await.unwrap();
     println!("Received server connection and player data for new player...");
 
     socket
-        .send(axum::extract::ws::Message::Text(format!(
-            "name\n{}",
-            player_data
-        )))
+        .send(ServerPacket::PacketNAME(player_name, player_color).into())
         .await
         .unwrap();
+
+    let mut bomb_actions: Vec<Option<tokio::sync::oneshot::Sender<BombMoveAction>>> = Vec::new();
+    bomb_actions.resize_with(bomb_count as usize, || Option::None);
 
     loop {
         tokio::select! {
@@ -210,7 +198,7 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                 player_leave_notify.send(player_id).await.unwrap();
 
                 let packet = packet.unwrap();
-                match packet {
+                let packet = match packet {
                     Err(_) => {
                         println!("A websocket connection produced a error (probably abruptly closed)...");
                         player_leave_notify.send(player_id).await.unwrap();
@@ -218,72 +206,47 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                     }
                     Ok(axum::extract::ws::Message::Close(_)) => {
                         println!("Client leaved...");
+                        player_leave_notify.send(player_id).await.unwrap();
+                        return;
                     }
-                    _ => {
+                    Ok(axum::extract::ws::Message::Text(text)) => text,
+                    Ok(_) => {
+                        println!("Received unexpected non-text packet from client...");
+                        player_leave_notify.send(player_id).await.unwrap();
                         socket
                             .send(axum::extract::ws::Message::Close(Option::None))
                             .await
                             .unwrap();
-                        println!("Received unexpected packet from client...");
+                        return;
                     }
-                }
-                return;
-            }
-            update = update_receiver.recv() => {
-                let update = update.unwrap();
-                match update {
-                    GameUpdate::BombMoved(position) => {
+                };
+
+                let packet = match packet.parse::<ClientPacket>() {
+                    Err(err) => {
+                        println!("A websocket connection sent a packet expected to be a MOVE but failed parsing:\n\t{}", err);
+                        player_leave_notify.send(player_id).await.unwrap();
                         socket
-                            .send(axum::extract::ws::Message::Text(format!(
-                                "status\n0 {}",
-                                match position {
-                                    BombPosition::L => "L",
-                                    BombPosition::R => "R",
-                                }
-                            )))
+                            .send(axum::extract::ws::Message::Close(Option::None))
                             .await
                             .unwrap();
-                        socket
-                            .send(axum::extract::ws::Message::Text(format!(
-                                "board\n{}",
-                                scoreboard_receiver.borrow().to_string()
-                            )))
-                            .await
-                            .unwrap();
+                        return;
                     }
-                    GameUpdate::BombReceived(reaction_sender) => {
-                        socket.send(axum::extract::ws::Message::Text("status\n0 X".into())).await.unwrap();
+                    Ok(packet) => packet,
+                };
+
+                match packet {
+                    ClientPacket::PacketOLLEH(_) => {
+                        println!("A websocket connection sent a packet expected to be a MOVE but is a OLLEH");
+                        player_leave_notify.send(player_id).await.unwrap();
                         socket
-                            .send(axum::extract::ws::Message::Text(format!(
-                                "board\n{}",
-                                scoreboard_receiver.borrow().to_string()
-                            )))
+                            .send(axum::extract::ws::Message::Close(Option::None))
                             .await
                             .unwrap();
-                        let response = match socket.recv().await.unwrap() {
-                            Err(_) => {
-                                println!("A websocket connection produced a error (probably abruptly closed) before sending a MOVE response...");
-                                player_leave_notify.send(player_id).await.unwrap();
-                                return;
-                            }
-                            Ok(axum::extract::ws::Message::Close(_)) => {
-                                println!("A websocket connection closed before sending a MOVE response...");
-                                player_leave_notify.send(player_id).await.unwrap();
-                                return;
-                            }
-                            Ok(axum::extract::ws::Message::Text(text)) => text,
-                            _ => {
-                                println!("A websocket connection sended a MOVE response that's not a text message...");
-                                player_leave_notify.send(player_id).await.unwrap();
-                                socket
-                                    .send(axum::extract::ws::Message::Close(Option::None))
-                                    .await
-                                    .unwrap();
-                               return;
-                            }
-                        };
-                        if !response.starts_with("move\n0 ") || response.len() != 9 {
-                            println!("A websocket connection sended a MOVE response that's not formatted properly...");
+                        return;
+                    }
+                    ClientPacket::PacketMOVE(index, action) => {
+                        if index >= bomb_count {
+                            println!("A websocket connection sent a MOVE packet with a index out of bound");
                             player_leave_notify.send(player_id).await.unwrap();
                             socket
                                 .send(axum::extract::ws::Message::Close(Option::None))
@@ -291,10 +254,9 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                                 .unwrap();
                             return;
                         }
-                        let player_move = match response[7..9].parse() {
-                            Ok(player_move) => player_move,
-                            Err(_) => {
-                                println!("A websocket connection sended a MOVE response that's not formatted properly...");
+                        match &bomb_actions[index as usize] {
+                            None => {
+                                println!("A websocket connection sent a MOVE packet while not holding the specified bomb");
                                 player_leave_notify.send(player_id).await.unwrap();
                                 socket
                                     .send(axum::extract::ws::Message::Close(Option::None))
@@ -302,8 +264,27 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                                     .unwrap();
                                 return;
                             }
-                        };
-                        let _ = reaction_sender.send(player_move);
+                            _ => {}
+                        }
+                        bomb_actions[index as usize].take().unwrap().send(action);
+                    }
+                }
+            }
+            update = update_receiver.recv() => {
+                let (index, update) = update.unwrap();
+                let board = {
+                    scoreboard_receiver.borrow().to_string()
+                };
+                match update {
+                    GameUpdate::BombMoved(position) => {
+                        socket.send(ServerPacket::PacketSTATUS(index, position.clone()).into()).await.unwrap();
+                        socket.send(ServerPacket::PacketBOARD(board).into()).await.unwrap();
+                        bomb_actions[index as usize] = None;
+                    }
+                    GameUpdate::BombReceived(action_sender) => {
+                        socket.send(ServerPacket::PacketSTATUS(index, BombPosition::X).into()).await.unwrap();
+                        socket.send(ServerPacket::PacketBOARD(board).into()).await.unwrap();
+                        bomb_actions[index as usize] = Some(action_sender);
                     },
                 }
             }
@@ -312,16 +293,25 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
 }
 
 async fn game_server(
-    mut game_request_rx: tokio::sync::mpsc::Receiver<(
-        u32,
+    mut game_request_rx: tokio::sync::mpsc::Receiver<
         tokio::sync::oneshot::Sender<(
-            u32,
-            String,
-            tokio::sync::mpsc::Receiver<GameUpdate>,
-            tokio::sync::watch::Receiver<String>,
-            tokio::sync::mpsc::Sender<u32>,
+            // bomb count is sent before hello packet
+            BombCount,
+            tokio::sync::oneshot::Sender<(
+                // Newly connected client can suggest a position/ID for the player
+                PreferredID,
+                // Player data are only created after olleh packet
+                tokio::sync::oneshot::Sender<(
+                    PlayerID,
+                    (PlayerName, PlayerColor),
+                    tokio::sync::mpsc::Receiver<(BombIndex, GameUpdate)>,
+                    tokio::sync::watch::Receiver<GameScoareboard>,
+                    tokio::sync::mpsc::Sender<PlayerID>,
+                )>,
+            )>,
         )>,
-    )>,
+    >,
+    count: BombCount,
 ) {
     println!("Server Started");
     loop {
@@ -511,21 +501,29 @@ async fn game_server(
 //
 #[tokio::main]
 async fn main() {
-    let (game_request_tx, game_request_rx) = tokio::sync::mpsc::channel::<(
-        u32,
+    let (game_request_tx, game_request_rx) = tokio::sync::mpsc::channel::<
         tokio::sync::oneshot::Sender<(
-            u32,
-            String,
-            tokio::sync::mpsc::Receiver<GameUpdate>,
-            tokio::sync::watch::Receiver<String>,
-            tokio::sync::mpsc::Sender<u32>,
+            // bomb count is sent before hello packet
+            BombCount,
+            tokio::sync::oneshot::Sender<(
+                // Newly connected client can suggest a position/ID for the player
+                PreferredID,
+                // Player data are only created after olleh packet
+                tokio::sync::oneshot::Sender<(
+                    PlayerID,
+                    (PlayerName, PlayerColor),
+                    tokio::sync::mpsc::Receiver<(BombIndex, GameUpdate)>,
+                    tokio::sync::watch::Receiver<GameScoareboard>,
+                    tokio::sync::mpsc::Sender<PlayerID>,
+                )>,
+            )>,
         )>,
-    )>(32);
+    >(32);
 
     //let shared_state = std::sync::Arc::new();
     let shared_state = AppState { game_request_tx };
 
-    tokio::spawn(async move { game_server(game_request_rx).await });
+    tokio::spawn(async move { game_server(game_request_rx, 5).await });
 
     // build our application with a single route
 

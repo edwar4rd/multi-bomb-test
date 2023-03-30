@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BombMoveAction {
     L3,
     L1,
@@ -35,7 +35,7 @@ impl std::fmt::Display for BombMoveAction {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum BombPosition {
     L,
     X,
@@ -71,14 +71,15 @@ impl std::fmt::Display for BombPosition {
 
 pub type BombCount = u32;
 pub type BombIndex = u32;
+pub type PlayerID = u32;
 pub type PreferredID = u32;
 pub type GameScore = u32;
 pub type PlayerName = String;
 pub type PlayerColor = String;
 pub type GameScoareboard = String;
 
-#[derive(Debug)]
-enum ClientPacket {
+#[derive(Debug, Clone)]
+pub enum ClientPacket {
     PacketOLLEH(PreferredID),
     PacketMOVE(BombIndex, BombMoveAction),
 }
@@ -129,6 +130,7 @@ impl std::str::FromStr for ClientPacket {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum ServerPacket {
     PacketHELLO(BombCount),
     PacketNAME(PlayerName, PlayerColor),
@@ -150,5 +152,11 @@ impl std::fmt::Display for ServerPacket {
             }
             Self::PacketBOARD(game_scoreboard) => write!(f, "board\n{}", game_scoreboard),
         }
+    }
+}
+
+impl From<ServerPacket> for axum::extract::ws::Message {
+    fn from(packet: ServerPacket) -> Self {
+        axum::extract::ws::Message::Text(packet.to_string())
     }
 }
