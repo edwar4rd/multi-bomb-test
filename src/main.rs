@@ -25,7 +25,7 @@ struct AppState {
                 // Player data are only created after olleh packet
                 tokio::sync::oneshot::Sender<(
                     PlayerID,
-                    (PlayerName, PlayerColor),
+                    PlayerData,
                     tokio::sync::mpsc::Receiver<(BombIndex, GameUpdate)>,
                     tokio::sync::watch::Receiver<GameScoareboard>,
                     tokio::sync::mpsc::Sender<PlayerID>,
@@ -195,41 +195,27 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
             biased;
 
             packet = socket.recv() => {
-                player_leave_notify.send(player_id).await.unwrap();
-
                 let packet = packet.unwrap();
                 let packet = match packet {
                     Err(_) => {
                         println!("A websocket connection produced a error (probably abruptly closed)...");
-                        player_leave_notify.send(player_id).await.unwrap();
-                        return;
+                        break;
                     }
                     Ok(axum::extract::ws::Message::Close(_)) => {
                         println!("Client leaved...");
-                        player_leave_notify.send(player_id).await.unwrap();
-                        return;
+                        break;
                     }
                     Ok(axum::extract::ws::Message::Text(text)) => text,
                     Ok(_) => {
                         println!("Received unexpected non-text packet from client...");
-                        player_leave_notify.send(player_id).await.unwrap();
-                        socket
-                            .send(axum::extract::ws::Message::Close(Option::None))
-                            .await
-                            .unwrap();
-                        return;
+                        break;
                     }
                 };
 
                 let packet = match packet.parse::<ClientPacket>() {
                     Err(err) => {
                         println!("A websocket connection sent a packet expected to be a MOVE but failed parsing:\n\t{}", err);
-                        player_leave_notify.send(player_id).await.unwrap();
-                        socket
-                            .send(axum::extract::ws::Message::Close(Option::None))
-                            .await
-                            .unwrap();
-                        return;
+                        break;
                     }
                     Ok(packet) => packet,
                 };
@@ -237,36 +223,21 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                 match packet {
                     ClientPacket::PacketOLLEH(_) => {
                         println!("A websocket connection sent a packet expected to be a MOVE but is a OLLEH");
-                        player_leave_notify.send(player_id).await.unwrap();
-                        socket
-                            .send(axum::extract::ws::Message::Close(Option::None))
-                            .await
-                            .unwrap();
-                        return;
+                        break;
                     }
                     ClientPacket::PacketMOVE(index, action) => {
                         if index >= bomb_count {
                             println!("A websocket connection sent a MOVE packet with a index out of bound");
-                            player_leave_notify.send(player_id).await.unwrap();
-                            socket
-                                .send(axum::extract::ws::Message::Close(Option::None))
-                                .await
-                                .unwrap();
-                            return;
+                            break;
                         }
                         match &bomb_actions[index as usize] {
                             None => {
                                 println!("A websocket connection sent a MOVE packet while not holding the specified bomb");
-                                player_leave_notify.send(player_id).await.unwrap();
-                                socket
-                                    .send(axum::extract::ws::Message::Close(Option::None))
-                                    .await
-                                    .unwrap();
-                                return;
+                                break;
                             }
                             _ => {}
                         }
-                        bomb_actions[index as usize].take().unwrap().send(action);
+                        bomb_actions[index as usize].take().unwrap().send(action).unwrap();
                     }
                 }
             }
@@ -290,6 +261,18 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
             }
         };
     }
+
+    for mut action_tx in bomb_actions {
+        if let Some(action_tx) = action_tx.take() {
+            action_tx.send(BombMoveAction::R1).unwrap();
+        }
+    }
+
+    player_leave_notify.send(player_id).await.unwrap();
+    let _ = socket
+        .send(axum::extract::ws::Message::Close(Option::None))
+        .await;
+    return;
 }
 
 async fn game_server(
@@ -303,7 +286,7 @@ async fn game_server(
                 // Player data are only created after olleh packet
                 tokio::sync::oneshot::Sender<(
                     PlayerID,
-                    (PlayerName, PlayerColor),
+                    PlayerData,
                     tokio::sync::mpsc::Receiver<(BombIndex, GameUpdate)>,
                     tokio::sync::watch::Receiver<GameScoareboard>,
                     tokio::sync::mpsc::Sender<PlayerID>,
@@ -311,64 +294,155 @@ async fn game_server(
             )>,
         )>,
     >,
-    count: BombCount,
+    bomb_count: BombCount,
 ) {
     println!("Server Started");
-    loop {
-        // Wait for a first player to start the game
-        println!("Waiting for first player to join...");
-        let (new_player_id, request_response_tx) = match game_request_rx.recv().await {
-            Some((new_player_id, request_response_tx)) => (new_player_id, request_response_tx),
-            None => {
-                println!("Server Exited");
-                break;
-            }
-        };
-        println!("A player joined...");
 
+    let mut wait_olleh = tokio::task::JoinSet::new();
+    loop {
         // only insert/delete when players join or leave
         // a set of all players (for calculating new bomb position)
-        let mut players = std::collections::BTreeSet::<u32>::new();
+        let mut players = std::collections::BTreeSet::<PlayerID>::new();
         // player id -> player name + color
-        let mut players_data = std::collections::BTreeMap::<u32, String>::new();
+        let mut players_data = std::collections::BTreeMap::<PlayerID, PlayerData>::new();
 
         // player id -> player score
-        let mut players_score = std::collections::BTreeMap::<u32, u32>::new();
+        let mut players_score = std::collections::BTreeMap::<PlayerID, GameScore>::new();
 
-        let new_player_data = random_player_data();
-        let mut bomb_pos = new_player_id;
+        let mut bomb_pos = Vec::new();
 
-        let mut players_channel =
-            std::collections::BTreeMap::<u32, tokio::sync::mpsc::Sender<GameUpdate>>::new();
+        let mut players_channel = std::collections::BTreeMap::<
+            PlayerID,
+            tokio::sync::mpsc::Sender<(u32, GameUpdate)>,
+        >::new();
+
         let (scoreboard_watch_tx, scoreboard_watch_rx) =
-            tokio::sync::watch::channel(format!("{}\n0\n", &new_player_data));
+            tokio::sync::watch::channel("".to_string());
         let (player_leave_notify_tx, mut player_leave_notify_rx) = tokio::sync::mpsc::channel(32);
 
-        players.insert(new_player_id);
-        players_data.insert(new_player_id, new_player_data.clone());
-        let (new_player_status_tx, new_player_status_rx) = tokio::sync::mpsc::channel(4);
-
-        request_response_tx
-            .send((
-                new_player_id,
-                new_player_data,
-                new_player_status_rx,
-                scoreboard_watch_rx.clone(),
-                player_leave_notify_tx.clone(),
-            ))
-            .unwrap();
-
-        let (action_tx, mut action_rx) = tokio::sync::oneshot::channel();
-        let mut send_start = tokio::time::Instant::now();
-        new_player_status_tx
-            .send(GameUpdate::BombReceived(action_tx))
-            .await
-            .unwrap();
-        players_channel.insert(new_player_id, new_player_status_tx);
+        let mut wait_bomb_action = tokio::task::JoinSet::new();
 
         loop {
             tokio::select! {
                 biased;
+
+                new_request = game_request_rx.recv() => {
+                    let new_request = new_request.unwrap();
+                    let (wait_olleh_tx, wait_olleh_rx) = tokio::sync::oneshot::channel();
+                    new_request.send((bomb_count, wait_olleh_tx)).unwrap();
+                    wait_olleh.spawn(async move { wait_olleh_rx.await });
+                }
+
+                ollehed_request = wait_olleh.join_next(), if wait_olleh.len() > 0 => {
+                    match ollehed_request.unwrap().unwrap() {
+                        Err(_) => {
+                            println!("A game request closed before returning OLLEH result...");
+                        }
+                        Ok((new_player_id, request_response)) => {
+                            println!("A player joined...");
+                            bomb_pos.resize(bomb_count as usize, new_player_id);
+                            let new_player_data = random_player_data();
+                            scoreboard_watch_tx.send_replace(format!(
+                                "{}\n0\n",
+                                format!("{}\n{}", new_player_data.0, new_player_data.1)
+                            ));
+                            players.insert(new_player_id);
+                            players_data.insert(new_player_id, new_player_data.clone());
+                            let (new_player_status_tx, new_player_status_rx) = tokio::sync::mpsc::channel(4);
+
+                            request_response
+                                .send((
+                                    new_player_id,
+                                    new_player_data,
+                                    new_player_status_rx,
+                                    scoreboard_watch_rx.clone(),
+                                    player_leave_notify_tx.clone(),
+                                ))
+                                .unwrap();
+                            for bomb_index in 0..bomb_count {
+                                let (action_tx, action_rx) = tokio::sync::oneshot::channel();
+                                let send_start = tokio::time::Instant::now();
+                                new_player_status_tx
+                                    .send((bomb_index, GameUpdate::BombReceived(action_tx)))
+                                    .await
+                                    .unwrap();
+                                wait_bomb_action.spawn(async move { (bomb_index, send_start, action_rx.await) });
+                            }
+                            players_channel.insert(new_player_id, new_player_status_tx);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+
+                action_result = wait_bomb_action.join_next(), if wait_bomb_action.len() > 0 => {
+                    let (bomb_index, send_start, action) = action_result.unwrap().unwrap();
+                    let move_time = (tokio::time::Instant::now() - send_start).as_millis() as i32;
+                    match action {
+                        Err(_) => {
+                            panic!("Player leaved before moving bomb");
+                        }
+                        Ok(action) => {
+                            let move_score = if 4000 > move_time {
+                                4100 - move_time
+                            } else {
+                                0
+                            };
+                            players_score.insert(
+                                bomb_pos[bomb_index as usize],
+                                players_score
+                                    .get(&bomb_pos[bomb_index as usize])
+                                    .unwrap_or(&0)
+                                    + move_score as u32,
+                            );
+                            println!("{} got {move_score} points!", bomb_pos[bomb_index as usize]);
+                            scoreboard_watch_tx.send_replace({
+                                let mut scoreboard_map = std::collections::BTreeMap::new();
+
+                                for (player_id, score) in &players_score {
+                                    scoreboard_map
+                                        .insert((score, player_id), (&players_data[&player_id], score));
+                                }
+
+                                let mut scoreboard_string = String::new();
+                                for (_, (data, score)) in scoreboard_map.into_iter().rev() {
+                                    scoreboard_string.push_str(&format!("{}\n{}", data.0, data.1));
+                                    scoreboard_string.push_str(&format!("\n{score}\n"));
+                                }
+                                scoreboard_string
+                            });
+                            bomb_pos[bomb_index as usize] =
+                                move_bomb(bomb_pos[bomb_index as usize], &players, action);
+                            for (player_id, channel) in &players_channel {
+                                if *player_id < bomb_pos[bomb_index as usize] {
+                                    channel
+                                        .send((bomb_index, GameUpdate::BombMoved(BombPosition::R)))
+                                        .await;
+                                        // .unwrap();
+                                }
+                                if bomb_pos[bomb_index as usize] < *player_id {
+                                    channel
+                                        .send((bomb_index, GameUpdate::BombMoved(BombPosition::L)))
+                                        .await;
+                                        // .unwrap();
+                                }
+                            }
+                            let (action_tx, action_rx) = tokio::sync::oneshot::channel();
+                            let send_start = tokio::time::Instant::now();
+                            players_channel[&bomb_pos[bomb_index as usize]]
+                                .send((bomb_index, GameUpdate::BombReceived(action_tx)))
+                                .await
+                                .unwrap();
+                            wait_bomb_action
+                                .spawn(async move { (bomb_index, send_start, action_rx.await) });
+                        }
+                    }
+                }
 
                 leaved_player = player_leave_notify_rx.recv() => {
                     let leaved_player = leaved_player.unwrap();
@@ -382,119 +456,82 @@ async fn game_server(
                     players_data.remove(&leaved_player);
                     players_score.remove(&leaved_player);
 
-                    if bomb_pos == leaved_player {
-                        bomb_pos = move_bomb(bomb_pos, &players, BombMoveAction::R1);
+                    for bomb_index in 0..bomb_count {
+                        assert_ne!(bomb_pos[bomb_index as usize], leaved_player);
                     }
-
-                    for (player_id, channel) in &players_channel {
-                        if *player_id < bomb_pos {
-                            channel
-                                .send(GameUpdate::BombMoved(BombPosition::R))
-                                .await
-                                .unwrap();
-                        }
-                        if bomb_pos < *player_id {
-                            channel
-                                .send(GameUpdate::BombMoved(BombPosition::L))
-                                .await
-                                .unwrap();
-                        }
-                    }
-
-                    let (action_tx, new_action_rx) = tokio::sync::oneshot::channel();
-                    action_rx = new_action_rx;
-                    send_start = tokio::time::Instant::now();
-                    players_channel[&bomb_pos]
-                        .send(GameUpdate::BombReceived(action_tx))
-                        .await
-                        .unwrap();
-                },
-                player_move = &mut action_rx =>
-                {
-                    let player_move = player_move.unwrap();
-                    let move_time = (tokio::time::Instant::now() - send_start).as_millis() as i32;
-                    let move_score = if 8000 > move_time  {
-                        8100 - move_time
-                    } else {
-                        0
-                    };
-                    players_score.insert(
-                        bomb_pos,
-                        players_score.get(&bomb_pos).unwrap_or(&0) + move_score as u32,
-                    );
-                    println!("{bomb_pos} got {move_score} points!");
-
-                    scoreboard_watch_tx.send_replace({
-                        let mut scoreboard_map = std::collections::BTreeMap::new();
-
-                        for (player_id, score) in &players_score {
-                            scoreboard_map.insert((score, player_id), (&players_data[&player_id], score));
-                        }
-
-                        let mut scoreboard_string = String::new();
-                        for (_, (data, score)) in scoreboard_map.into_iter().rev() {
-                            scoreboard_string.push_str(data);
-                            scoreboard_string.push_str(&format!("\n{score}\n"));
-                        }
-                        scoreboard_string
-                    });
-
-                    bomb_pos = move_bomb(bomb_pos, &players, player_move);
-
-                    for (player_id, channel) in &players_channel {
-                        if *player_id < bomb_pos {
-                            channel
-                                .send(GameUpdate::BombMoved(BombPosition::R))
-                                .await
-                                .unwrap();
-                        }
-                        if bomb_pos < *player_id {
-                            channel
-                                .send(GameUpdate::BombMoved(BombPosition::L))
-                                .await
-                                .unwrap();
-                        }
-                    }
-
-                    let (action_tx, new_action_rx) = tokio::sync::oneshot::channel();
-                    action_rx = new_action_rx;
-                    send_start = tokio::time::Instant::now();
-                    players_channel[&bomb_pos]
-                        .send(GameUpdate::BombReceived(action_tx))
-                        .await
-                        .unwrap();
-
-                    // todo: handle player leave during the above
-                },
-                new_request = game_request_rx.recv() => {
-                    let (mut new_player_id, request_response_tx) = new_request.unwrap();
-                    if players.contains(&new_player_id) {
-                        new_player_id = *players.last().unwrap()+1;
-                    }
-
-                    let new_player_data = random_player_data();
-
-                    players.insert(new_player_id);
-                    players_data.insert(new_player_id, new_player_data.clone());
-                    let (new_player_status_tx, new_player_status_rx) = tokio::sync::mpsc::channel(4);
-
-                    request_response_tx
-                        .send((
-                            new_player_id,
-                            new_player_data,
-                            new_player_status_rx,
-                            scoreboard_watch_rx.clone(),
-                            player_leave_notify_tx.clone(),
-                        ))
-                        .unwrap();
-                    new_player_status_tx.send(if bomb_pos < new_player_id {
-                        GameUpdate::BombMoved(BombPosition::L)
-                    } else {
-                        GameUpdate::BombMoved(BombPosition::L)
-                    }).await.unwrap();
-                    players_channel.insert(new_player_id, new_player_status_tx);
                 }
-            };
+
+                ollehed_request = wait_olleh.join_next(), if wait_olleh.len() > 0 => {
+                    match ollehed_request.unwrap().unwrap() {
+                        Err(_) => {
+                            println!("A game request closed before returning OLLEH result...");
+                        }
+                        Ok((preferred_id, request_response)) => {
+                            println!("A new player joined...");
+                            let new_player_id = if players.contains(&preferred_id) {
+                                *players.last().unwrap() + 1
+                            } else {
+                                preferred_id
+                            };
+
+                            let new_player_data = random_player_data();
+
+                            players.insert(preferred_id);
+                            players_data.insert(new_player_id, new_player_data.clone());
+                            let (new_player_status_tx, new_player_status_rx) =
+                            tokio::sync::mpsc::channel(4);
+
+                            scoreboard_watch_tx.send_replace({
+                                let mut scoreboard_map = std::collections::BTreeMap::new();
+
+                                for (player_id, score) in &players_score {
+                                    scoreboard_map
+                                        .insert((score, player_id), (&players_data[&player_id], score));
+                                }
+
+                                let mut scoreboard_string = String::new();
+                                for (_, (data, score)) in scoreboard_map.into_iter().rev() {
+                                    scoreboard_string.push_str(&format!("{}\n{}", data.0, data.1));
+                                    scoreboard_string.push_str(&format!("\n{score}\n"));
+                                }
+                                scoreboard_string
+                            });
+
+                            request_response
+                                .send((
+                                    new_player_id,
+                                    new_player_data,
+                                    new_player_status_rx,
+                                    scoreboard_watch_rx.clone(),
+                                    player_leave_notify_tx.clone(),
+                                ))
+                                .unwrap();
+                            for bomb_index in 0..bomb_count {
+                                new_player_status_tx
+                                    .send((
+                                        bomb_index,
+                                        if bomb_pos[bomb_index as usize] < new_player_id {
+                                            GameUpdate::BombMoved(BombPosition::L)
+                                        } else {
+                                            GameUpdate::BombMoved(BombPosition::L)
+                                        },
+                                    ))
+                                    .await
+                                    .unwrap();
+                            }
+                            players_channel.insert(new_player_id, new_player_status_tx);
+                        }
+                    }
+                }
+
+                new_request = game_request_rx.recv() => {
+                    let new_request = new_request.unwrap();
+                    let (wait_olleh_tx, wait_olleh_rx) = tokio::sync::oneshot::channel();
+                    new_request.send((bomb_count, wait_olleh_tx)).unwrap();
+                    wait_olleh.spawn(async move { wait_olleh_rx.await });
+                }
+
+            }
         }
     }
 }

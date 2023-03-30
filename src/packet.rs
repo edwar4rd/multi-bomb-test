@@ -35,6 +35,17 @@ impl std::fmt::Display for BombMoveAction {
     }
 }
 
+impl rand::distributions::Distribution<BombMoveAction> for rand::distributions::Standard {
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> BombMoveAction {
+        match rng.gen_range(0..=5) {
+            0 => BombMoveAction::L3,
+            1..=2 => BombMoveAction::L1,
+            3..=4 => BombMoveAction::R1,
+            _ => BombMoveAction::R2,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub enum BombPosition {
     L,
@@ -76,6 +87,7 @@ pub type PreferredID = u32;
 pub type GameScore = u32;
 pub type PlayerName = String;
 pub type PlayerColor = String;
+pub type PlayerData = (PlayerName, PlayerColor);
 pub type GameScoareboard = String;
 
 #[derive(Debug, Clone)]
