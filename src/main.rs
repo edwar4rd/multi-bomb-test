@@ -380,6 +380,23 @@ async fn game_server(
             tokio::select! {
                 biased;
 
+                leaved_player = player_leave_notify_rx.recv() => {
+                    let leaved_player = leaved_player.unwrap();
+                    players.remove(&leaved_player);
+                    if players.len() == 0 {
+                        println!("All player leaved...");
+                        break;
+                    }
+
+                    players_channel.remove(&leaved_player);
+                    players_data.remove(&leaved_player);
+                    players_score.remove(&leaved_player);
+
+                    for bomb_index in 0..bomb_count {
+                        assert_ne!(bomb_pos[bomb_index as usize], leaved_player);
+                    }
+                }
+
                 action_result = wait_bomb_action.join_next(), if wait_bomb_action.len() > 0 => {
                     let (bomb_index, send_start, action) = action_result.unwrap().unwrap();
                     let move_time = (tokio::time::Instant::now() - send_start).as_millis() as i32;
@@ -441,23 +458,6 @@ async fn game_server(
                             wait_bomb_action
                                 .spawn(async move { (bomb_index, send_start, action_rx.await) });
                         }
-                    }
-                }
-
-                leaved_player = player_leave_notify_rx.recv() => {
-                    let leaved_player = leaved_player.unwrap();
-                    players.remove(&leaved_player);
-                    if players.len() == 0 {
-                        println!("All player leaved...");
-                        break;
-                    }
-
-                    players_channel.remove(&leaved_player);
-                    players_data.remove(&leaved_player);
-                    players_score.remove(&leaved_player);
-
-                    for bomb_index in 0..bomb_count {
-                        assert_ne!(bomb_pos[bomb_index as usize], leaved_player);
                     }
                 }
 
