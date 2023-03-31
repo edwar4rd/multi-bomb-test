@@ -177,7 +177,7 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
         player_id,
         (player_name, player_color),
         mut update_receiver,
-        scoreboard_receiver,
+        mut scoreboard_receiver,
         player_leave_notify,
     ) = request_result_rx.await.unwrap();
     println!("Received server connection and player data for new player...");
@@ -243,30 +243,33 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
             }
             update = update_receiver.recv() => {
                 let (index, update) = update.unwrap();
-                let board = {
-                    scoreboard_receiver.borrow().to_string()
-                };
                 match update {
                     GameUpdate::BombMoved(position) => {
                         socket.send(ServerPacket::PacketSTATUS(index, position.clone()).into()).await.unwrap();
-                        socket.send(ServerPacket::PacketBOARD(board).into()).await.unwrap();
                         bomb_actions[index as usize] = None;
                     }
                     GameUpdate::BombReceived(action_sender) => {
                         socket.send(ServerPacket::PacketSTATUS(index, BombPosition::X).into()).await.unwrap();
-                        socket.send(ServerPacket::PacketBOARD(board).into()).await.unwrap();
                         bomb_actions[index as usize] = Some(action_sender);
                     },
                 }
             }
+
+            _ = scoreboard_receiver.changed() => {
+                let board = {
+                    scoreboard_receiver.borrow().to_string()
+                };
+                socket.send(ServerPacket::PacketBOARD(board).into()).await.unwrap();
+            }
         };
     }
 
-    for mut action_tx in bomb_actions {
-        if let Some(action_tx) = action_tx.take() {
-            action_tx.send(BombMoveAction::R1).unwrap();
-        }
-    }
+    // this part SHOULD be optional after the problem is fixed
+    // for mut action_tx in bomb_actions {
+        // if let Some(action_tx) = action_tx.take() {
+            // action_tx.send(BombMoveAction::R1).unwrap();
+        // }
+    // }
 
     player_leave_notify.send(player_id).await.unwrap();
     let _ = socket
@@ -322,6 +325,7 @@ async fn game_server(
 
         let mut wait_bomb_action = tokio::task::JoinSet::new();
 
+        let mut debug_tolerable_task;
         loop {
             tokio::select! {
                 biased;
@@ -342,14 +346,15 @@ async fn game_server(
                             println!("A player joined...");
                             bomb_pos.resize(bomb_count as usize, new_player_id);
                             let new_player_data = random_player_data();
+                            players.insert(new_player_id);
+                            players_data.insert(new_player_id, new_player_data.clone());
+                            players_score.insert(new_player_id, 0);
+                            let (new_player_status_tx, new_player_status_rx) = tokio::sync::mpsc::channel(4);
                             scoreboard_watch_tx.send_replace(format!(
                                 "{}\n0\n",
                                 format!("{}\n{}", new_player_data.0, new_player_data.1)
                             ));
-                            players.insert(new_player_id);
-                            players_data.insert(new_player_id, new_player_data.clone());
-                            let (new_player_status_tx, new_player_status_rx) = tokio::sync::mpsc::channel(4);
-
+                            
                             request_response
                                 .send((
                                     new_player_id,
@@ -359,6 +364,7 @@ async fn game_server(
                                     player_leave_notify_tx.clone(),
                                 ))
                                 .unwrap();
+                            debug_tolerable_task = bomb_count;
                             for bomb_index in 0..bomb_count {
                                 let (action_tx, action_rx) = tokio::sync::oneshot::channel();
                                 let send_start = tokio::time::Instant::now();
@@ -393,8 +399,51 @@ async fn game_server(
                     players_score.remove(&leaved_player);
 
                     for bomb_index in 0..bomb_count {
-                        assert_ne!(bomb_pos[bomb_index as usize], leaved_player);
+                        // assert_ne!(bomb_pos[bomb_index as usize], leaved_player);
+                        if bomb_pos[bomb_index as usize] == leaved_player {
+                        bomb_pos[bomb_index as usize] =
+                                move_bomb(bomb_pos[bomb_index as usize], &players, BombMoveAction::R1);
+                            for (player_id, channel) in &players_channel {
+                                if *player_id < bomb_pos[bomb_index as usize] {
+                                    channel
+                                        .send((bomb_index, GameUpdate::BombMoved(BombPosition::R)))
+                                        .await
+                                        .unwrap();
+                                }
+                                if bomb_pos[bomb_index as usize] < *player_id {
+                                    channel
+                                        .send((bomb_index, GameUpdate::BombMoved(BombPosition::L)))
+                                        .await
+                                        .unwrap();
+                                }
+                            }
+                            let (action_tx, action_rx) = tokio::sync::oneshot::channel();
+                            let send_start = tokio::time::Instant::now();
+                            players_channel[&bomb_pos[bomb_index as usize]]
+                                .send((bomb_index, GameUpdate::BombReceived(action_tx)))
+                                .await
+                                .unwrap();
+                            wait_bomb_action
+                                .spawn(async move { (bomb_index, send_start, action_rx.await) });
+                            debug_tolerable_task += 1;
+                        }
                     }
+                    
+                    scoreboard_watch_tx.send_replace({
+                        let mut scoreboard_map = std::collections::BTreeMap::new();
+
+                        for (player_id, score) in &players_score {
+                            scoreboard_map
+                                .insert((score, player_id), (&players_data[&player_id], score));
+                        }
+
+                        let mut scoreboard_string = String::new();
+                        for (_, (data, score)) in scoreboard_map.into_iter().rev() {
+                            scoreboard_string.push_str(&format!("{}\n{}", data.0, data.1));
+                            scoreboard_string.push_str(&format!("\n{score}\n"));
+                        }
+                        scoreboard_string
+                    });
                 }
 
                 action_result = wait_bomb_action.join_next(), if wait_bomb_action.len() > 0 => {
@@ -402,7 +451,8 @@ async fn game_server(
                     let move_time = (tokio::time::Instant::now() - send_start).as_millis() as i32;
                     match action {
                         Err(_) => {
-                            panic!("Player leaved before moving bomb");
+                            debug_tolerable_task -= 1;
+                            println!("Player leaved before moving bomb");
                         }
                         Ok(action) => {
                             let move_score = if 4000 > move_time {
@@ -478,6 +528,7 @@ async fn game_server(
 
                             players.insert(preferred_id);
                             players_data.insert(new_player_id, new_player_data.clone());
+                            players_score.insert(new_player_id, 0);
                             let (new_player_status_tx, new_player_status_rx) =
                             tokio::sync::mpsc::channel(4);
 
@@ -513,12 +564,27 @@ async fn game_server(
                                         if bomb_pos[bomb_index as usize] < new_player_id {
                                             GameUpdate::BombMoved(BombPosition::L)
                                         } else {
-                                            GameUpdate::BombMoved(BombPosition::L)
+                                            GameUpdate::BombMoved(BombPosition::R)
                                         },
                                     ))
                                     .await
                                     .unwrap();
                             }
+                            scoreboard_watch_tx.send_replace({
+                                let mut scoreboard_map = std::collections::BTreeMap::new();
+
+                                for (player_id, score) in &players_score {
+                                    scoreboard_map
+                                        .insert((score, player_id), (&players_data[&player_id], score));
+                                }
+
+                                let mut scoreboard_string = String::new();
+                                for (_, (data, score)) in scoreboard_map.into_iter().rev() {
+                                    scoreboard_string.push_str(&format!("{}\n{}", data.0, data.1));
+                                    scoreboard_string.push_str(&format!("\n{score}\n"));
+                                }
+                                scoreboard_string
+                            });
                             players_channel.insert(new_player_id, new_player_status_tx);
                         }
                     }
@@ -532,6 +598,7 @@ async fn game_server(
                 }
 
             }
+            assert_eq!(debug_tolerable_task as usize, wait_bomb_action.len());
         }
     }
 }
