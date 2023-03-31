@@ -489,14 +489,14 @@ async fn game_server(
                                 if *player_id < bomb_pos[bomb_index as usize] {
                                     channel
                                         .send((bomb_index, GameUpdate::BombMoved(BombPosition::R)))
-                                        .await;
-                                        // .unwrap();
+                                        .await
+                                        .unwrap();
                                 }
                                 if bomb_pos[bomb_index as usize] < *player_id {
                                     channel
                                         .send((bomb_index, GameUpdate::BombMoved(BombPosition::L)))
-                                        .await;
-                                        // .unwrap();
+                                        .await
+                                        .unwrap();
                                 }
                             }
                             let (action_tx, action_rx) = tokio::sync::oneshot::channel();
