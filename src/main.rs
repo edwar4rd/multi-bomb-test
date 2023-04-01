@@ -390,7 +390,7 @@ async fn game_server(
                     let leaved_player = leaved_player.unwrap();
                     players.remove(&leaved_player);
                     if players.len() == 0 {
-                        println!("All player leaved...");
+                        println!("All players leaved...");
                         break;
                     }
 
