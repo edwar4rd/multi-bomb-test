@@ -519,14 +519,16 @@ async fn game_server(
                         Ok((preferred_id, request_response)) => {
                             println!("A new player joined...");
                             let new_player_id = if players.contains(&preferred_id) {
-                                *players.last().unwrap() + 1
+                                println!("ID conflict occured...\n");
+                                    *players.last().unwrap() + 1
                             } else {
                                 preferred_id
                             };
+                            println!("ID of the new player: {}", *players.last().unwrap() + 1);
 
                             let new_player_data = random_player_data();
 
-                            players.insert(preferred_id);
+                            players.insert(new_player_id);
                             players_data.insert(new_player_id, new_player_data.clone());
                             players_score.insert(new_player_id, 0);
                             let (new_player_status_tx, new_player_status_rx) =
@@ -631,6 +633,7 @@ async fn main() {
 
     // build our application with a single route
 
+    println!("{}", env!("CARGO_MANIFEST_DIR"));
     let assets_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
 
     let app = Router::new()
