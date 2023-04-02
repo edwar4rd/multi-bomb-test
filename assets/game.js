@@ -1,8 +1,8 @@
 let id = prompt("Please enter your preferred ID number", Math.floor(Math.random() * 200));
 
 let url = new URL(window.location.href);
-console.log("ws://" + url.hostname + ":3000/ws");
-let socket = new WebSocket("ws://" + url.hostname + ":3000/ws");
+console.log((url.protocol == "http:" ? "ws:" : "wss:") + "//" + url.host + "/ws");
+let socket = new WebSocket((url.protocol == "http:" ? "ws:" : "wss:") + "//" + url.host + "/ws");
 let bomb_text = { "X": "💣️", "L": "<<", "R": ">>" };
 
 let clickable = [false];
@@ -17,7 +17,9 @@ scoreboard_item[1].classList.add("game-players-score");
 
 socket.onopen = (event) => {
     socket.onmessage = (msg) => {
-        if (window.innerWidth/window.innerHeight < 1) bomb_text = { "X": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36"><path fill="#CCD6DD" d="M24.187 9.657l5.658-5.654L32 6.16l-5.658 5.655z"/><circle fill="#31373D" cx="14" cy="22" r="14"/><path fill="#31373D" d="M19 11.342l5.658-5.657 5.657 5.658L24.657 17z"/><circle fill="#F18F26" cx="32" cy="4" r="4"/><circle fill="#FDCB58" cx="32" cy="4" r="2"/></svg>', "L": "<<", "R": ">>" };
+        // uses twemoji (https://github.com/twitter/twemoji) as alternative option on mobile
+        // thanks twemoji for emoji graphics that look really nice!
+        if (window.innerWidth / window.innerHeight < 1) bomb_text = { "X": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36"><path fill="#CCD6DD" d="M24.187 9.657l5.658-5.654L32 6.16l-5.658 5.655z"/><circle fill="#31373D" cx="14" cy="22" r="14"/><path fill="#31373D" d="M19 11.342l5.658-5.657 5.657 5.658L24.657 17z"/><circle fill="#F18F26" cx="32" cy="4" r="4"/><circle fill="#FDCB58" cx="32" cy="4" r="2"/></svg>', "L": "<<", "R": ">>" };
         console.log(msg);
         let msg_split = msg.data.split("\n");
         let row_count = 1;
