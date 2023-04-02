@@ -9,7 +9,7 @@ use multi_bomb_test::packet::*;
 enum GameUpdate {
     BombMoved(BombPosition),
     // the player is expected to send back a BombMoveAction as response
-    BombReceived(tokio::sync::oneshot::Sender<BombMoveAction>),
+    BombReceived(tokio::sync::oneshot::Sender<Result<BombMoveAction, u32>>),
 }
 
 #[derive(Clone)]
@@ -187,8 +187,13 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
         .await
         .unwrap();
 
-    let mut bomb_actions: Vec<Option<tokio::sync::oneshot::Sender<BombMoveAction>>> = Vec::new();
+    let mut bomb_actions: Vec<Option<tokio::sync::oneshot::Sender<Result<BombMoveAction, u32>>>> =
+        Vec::new();
     bomb_actions.resize_with(bomb_count as usize, || Option::None);
+
+    let mut wait_bomb_timeout = tokio::task::JoinSet::<(u32, BombIndex)>::new();
+    let mut bomb_counter = Vec::<u32>::new();
+    bomb_counter.resize(bomb_count as usize, 0);
 
     loop {
         tokio::select! {
@@ -237,10 +242,12 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                             }
                             _ => {}
                         }
-                        bomb_actions[index as usize].take().unwrap().send(action).unwrap();
+                        bomb_actions[index as usize].take().unwrap().send(Ok(action)).unwrap();
+                        bomb_counter[index as usize]+=1;
                     }
                 }
             }
+
             update = update_receiver.recv() => {
                 let (index, update) = update.unwrap();
                 match update {
@@ -251,7 +258,24 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                     GameUpdate::BombReceived(action_sender) => {
                         socket.send(ServerPacket::PacketSTATUS(index, BombPosition::X).into()).await.unwrap();
                         bomb_actions[index as usize] = Some(action_sender);
+                        let current_count = bomb_counter[index as usize];
+                        wait_bomb_timeout.spawn(async move {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+                            (current_count, index)
+                        });
                     },
+                }
+            }
+
+            timeout_result = wait_bomb_timeout.join_next(), if wait_bomb_timeout.len() > 0 => {
+                let (counter, bomb_index) = timeout_result.unwrap().unwrap();
+                if bomb_counter[bomb_index as usize] == counter {
+                    bomb_actions[bomb_index as usize]
+                        .take()
+                        .unwrap()
+                        .send(Err(2000))
+                        .unwrap();
+                    bomb_counter[bomb_index as usize] += 1;
                 }
             }
 
@@ -266,9 +290,9 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
 
     // this part SHOULD be optional after the problem is fixed
     // for mut action_tx in bomb_actions {
-        // if let Some(action_tx) = action_tx.take() {
-            // action_tx.send(BombMoveAction::R1).unwrap();
-        // }
+    // if let Some(action_tx) = action_tx.take() {
+    // action_tx.send(BombMoveAction::R1).unwrap();
+    // }
     // }
 
     player_leave_notify.send(player_id).await.unwrap();
@@ -354,7 +378,7 @@ async fn game_server(
                                 "{}\n0\n",
                                 format!("{}\n{}", new_player_data.0, new_player_data.1)
                             ));
-                            
+
                             request_response
                                 .send((
                                     new_player_id,
@@ -428,7 +452,7 @@ async fn game_server(
                             debug_tolerable_task += 1;
                         }
                     }
-                    
+
                     scoreboard_watch_tx.send_replace({
                         let mut scoreboard_map = std::collections::BTreeMap::new();
 
@@ -455,58 +479,118 @@ async fn game_server(
                             println!("Player leaved before moving bomb");
                         }
                         Ok(action) => {
-                            let move_score = if 4000 > move_time {
-                                4100 - move_time
-                            } else {
-                                0
-                            };
-                            players_score.insert(
-                                bomb_pos[bomb_index as usize],
-                                players_score
+                            match action {
+                                Ok(action) => {
+                                    let move_score = if 4000 > move_time {
+                                        4100 - move_time
+                                    } else {
+                                        0
+                                    };
+                                    players_score.insert(
+                                        bomb_pos[bomb_index as usize],
+                                        players_score
+                                            .get(&bomb_pos[bomb_index as usize])
+                                            .unwrap_or(&0)
+                                            + move_score as u32,
+                                    );
+                                    println!("{} got {move_score} points!", bomb_pos[bomb_index as usize]);
+                                    scoreboard_watch_tx.send_replace({
+                                        let mut scoreboard_map = std::collections::BTreeMap::new();
+
+                                        for (player_id, score) in &players_score {
+                                            scoreboard_map
+                                                .insert((score, player_id), (&players_data[&player_id], score));
+                                        }
+
+                                        let mut scoreboard_string = String::new();
+                                        for (_, (data, score)) in scoreboard_map.into_iter().rev() {
+                                            scoreboard_string.push_str(&format!("{}\n{}", data.0, data.1));
+                                            scoreboard_string.push_str(&format!("\n{score}\n"));
+                                        }
+                                        scoreboard_string
+                                    });
+                                    bomb_pos[bomb_index as usize] =
+                                        move_bomb(bomb_pos[bomb_index as usize], &players, action);
+                                    for (player_id, channel) in &players_channel {
+                                        if *player_id < bomb_pos[bomb_index as usize] {
+                                            channel
+                                                .send((bomb_index, GameUpdate::BombMoved(BombPosition::R)))
+                                                .await
+                                                .unwrap();
+                                        }
+                                        if bomb_pos[bomb_index as usize] < *player_id {
+                                            channel
+                                                .send((bomb_index, GameUpdate::BombMoved(BombPosition::L)))
+                                                .await
+                                                .unwrap();
+                                        }
+                                    }
+                                    let (action_tx, action_rx) = tokio::sync::oneshot::channel();
+                                    let send_start = tokio::time::Instant::now();
+                                    players_channel[&bomb_pos[bomb_index as usize]]
+                                        .send((bomb_index, GameUpdate::BombReceived(action_tx)))
+                                        .await
+                                        .unwrap();
+                                    wait_bomb_action
+                                        .spawn(async move { (bomb_index, send_start, action_rx.await) });
+                                }
+                                Err(penalty) => {
+                                    let new_score = if *players_score
                                     .get(&bomb_pos[bomb_index as usize])
-                                    .unwrap_or(&0)
-                                    + move_score as u32,
-                            );
-                            println!("{} got {move_score} points!", bomb_pos[bomb_index as usize]);
-                            scoreboard_watch_tx.send_replace({
-                                let mut scoreboard_map = std::collections::BTreeMap::new();
+                                    .unwrap_or(&0) > penalty {
+                                        *players_score
+                                    .get(&bomb_pos[bomb_index as usize])
+                                    .unwrap_or(&0) - penalty
+                                    } else {
+                                        0
+                                    };
+                                    players_score.insert(
+                                        bomb_pos[bomb_index as usize],
+                                        new_score
+                                    );
+                                    println!("{} loses {penalty} points!", bomb_pos[bomb_index as usize]);
+                                    scoreboard_watch_tx.send_replace({
+                                        let mut scoreboard_map = std::collections::BTreeMap::new();
 
-                                for (player_id, score) in &players_score {
-                                    scoreboard_map
-                                        .insert((score, player_id), (&players_data[&player_id], score));
-                                }
+                                        for (player_id, score) in &players_score {
+                                            scoreboard_map
+                                                .insert((score, player_id), (&players_data[&player_id], score));
+                                        }
 
-                                let mut scoreboard_string = String::new();
-                                for (_, (data, score)) in scoreboard_map.into_iter().rev() {
-                                    scoreboard_string.push_str(&format!("{}\n{}", data.0, data.1));
-                                    scoreboard_string.push_str(&format!("\n{score}\n"));
-                                }
-                                scoreboard_string
-                            });
-                            bomb_pos[bomb_index as usize] =
-                                move_bomb(bomb_pos[bomb_index as usize], &players, action);
-                            for (player_id, channel) in &players_channel {
-                                if *player_id < bomb_pos[bomb_index as usize] {
-                                    channel
-                                        .send((bomb_index, GameUpdate::BombMoved(BombPosition::R)))
+                                        let mut scoreboard_string = String::new();
+                                        for (_, (data, score)) in scoreboard_map.into_iter().rev() {
+                                            scoreboard_string.push_str(&format!("{}\n{}", data.0, data.1));
+                                            scoreboard_string.push_str(&format!("\n{score}\n"));
+                                        }
+                                        scoreboard_string
+                                    });
+                                    bomb_pos[bomb_index as usize] =
+                                        move_bomb(bomb_pos[bomb_index as usize], &players, BombMoveAction::R1);
+                                    for (player_id, channel) in &players_channel {
+                                        if *player_id < bomb_pos[bomb_index as usize] {
+                                            channel
+                                                .send((bomb_index, GameUpdate::BombMoved(BombPosition::R)))
+                                                .await
+                                                .unwrap();
+                                        }
+                                        if bomb_pos[bomb_index as usize] < *player_id {
+                                            channel
+                                                .send((bomb_index, GameUpdate::BombMoved(BombPosition::L)))
+                                                .await
+                                                .unwrap();
+                                        }
+                                    }
+                                    let (action_tx, action_rx) = tokio::sync::oneshot::channel();
+                                    let send_start = tokio::time::Instant::now();
+                                    players_channel[&bomb_pos[bomb_index as usize]]
+                                        .send((bomb_index, GameUpdate::BombReceived(action_tx)))
                                         .await
                                         .unwrap();
-                                }
-                                if bomb_pos[bomb_index as usize] < *player_id {
-                                    channel
-                                        .send((bomb_index, GameUpdate::BombMoved(BombPosition::L)))
-                                        .await
-                                        .unwrap();
+                                    wait_bomb_action
+                                        .spawn(async move { (bomb_index, send_start, action_rx.await) });
                                 }
                             }
-                            let (action_tx, action_rx) = tokio::sync::oneshot::channel();
-                            let send_start = tokio::time::Instant::now();
-                            players_channel[&bomb_pos[bomb_index as usize]]
-                                .send((bomb_index, GameUpdate::BombReceived(action_tx)))
-                                .await
-                                .unwrap();
-                            wait_bomb_action
-                                .spawn(async move { (bomb_index, send_start, action_rx.await) });
+
                         }
                     }
                 }
