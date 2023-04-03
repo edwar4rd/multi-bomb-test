@@ -273,7 +273,7 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
                     bomb_actions[bomb_index as usize]
                         .take()
                         .unwrap()
-                        .send(Err(2000))
+                        .send(Err(6000))
                         .unwrap();
                     bomb_counter[bomb_index as usize] += 1;
                 }
