@@ -138,6 +138,10 @@ async fn ws_client_handler(mut socket: ws::WebSocket, state: AppState) {
     };
 
     let text_response = match response {
+        ws::Message::Close(_) => {
+            println!("A websocket connection closed before sending a OLLEH response...");
+            return;
+        }
         ws::Message::Text(text_response) => text_response,
         _ => {
             println!("A websocket connection sent a OLLEH response that's not a text message...");
