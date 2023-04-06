@@ -2,7 +2,7 @@ let id = prompt("Please enter your preferred ID number", Math.floor(Math.random(
 
 let url = new URL(window.location.href);
 console.log((url.protocol == "http:" ? "ws:" : "wss:") + "//" + url.host + url.pathname + "ws");
-let socket = new WebSocket((url.protocol == "http:" ? "ws:" : "wss:") + "//" + url.host + url.pathname + "/ws");
+let socket = new WebSocket((url.protocol == "http:" ? "ws:" : "wss:") + "//" + url.host + url.pathname + "ws");
 let bomb_text = { "X": "💣️", "L": "<<", "R": ">>" };
 
 let clickable = [false];
